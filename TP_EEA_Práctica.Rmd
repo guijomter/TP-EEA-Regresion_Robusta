@@ -1,0 +1,478 @@
+---
+title: "TP EEAA - Análisis de salarios con regresión por cuantiles"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r Setup, include=FALSE}
+# Cargar librerías usadas en todo el TP
+library(tidyverse)   # dplyr, ggplot2, readr, stringr, etc.
+library(ggplot2)
+library(quantreg)    # regresión por cuantiles
+library(scales)      # formatos bonitos para ejes (comma)
+library(purrr)
+library(lmtest)
+library(MASS)
+library(broom)
+
+
+
+
+
+# Cargar los datos
+salary <- read.csv("Salary_Data.csv")
+
+# Filtrar solo observaciones completas (evito problemas en modelos y gráficos)
+salary <- na.omit(salary)
+
+# Nos quedamos solo con géneros Male / Female para evitar categorías chicas (ej. Others)
+salary <- salary %>%
+  filter(Gender %in% c("Male", "Female"))
+
+# Creamos la variable años de educacion en base a nivel
+salary <- salary %>%
+  mutate(
+    EduYears = case_when(
+      Education.Level == "High School"        ~ 12,
+      Education.Level == "Bachelor's Degree"  ~ 16,
+      Education.Level == "Master's Degree"    ~ 18,
+      Education.Level == "PhD"                ~ 21,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(EduYears))   # por si quedara algún nivel raro
+```
+
+## 1. Datos
+
+Los datos utilizados provienen de un conjunto de avisos laborales publicados en **Glassdoor** para el sector **tech** (principalmente puestos vinculados a programación, ciencia de datos y desarrollo de software). 
+
+El conjunto original incluye información detallada sobre ubicación del puesto, tipo de empresa, descripción del trabajo, lenguaje de programación requerido y otras características. Para este trabajo práctico se utiliza una versión simplificada centrada en las variables:
+
+- **Age**: edad de la persona (años).  
+- **Gender**: género declarado (Male / Female).  
+- **Education.Level**: máximo nivel educativo alcanzado (High School, Bachelor’s Degree, Master’s Degree, PhD).  
+- **Job.Title**: título del puesto en el sector tech.  
+- **Years.of.Experience**: años de experiencia laboral.  
+- **Salary**: salario estimado anual en USD.
+
+Es importante remarcar que se trata de **datos observacionales** y de un subconjunto de empresas y postulantes que publican en Glassdoor, por lo que los resultados no necesariamente representan a todo el mercado laboral, pero sí permiten analizar patrones plausibles dentro del sector tecnológico.
+
+
+## 2. Exploración inicial de los datos
+
+```{r Exploración inicial, echo=FALSE}
+# Estructura de la base: tipos de variables y ejemplos
+glimpse(salary)
+
+# Resumen estadístico básico de las variables numéricas
+summary(salary)
+```
+
+---
+
+## 3. Distribución de salarios
+
+```{r Distribución del salario, echo=FALSE}
+# Histograma del salario. Se usa escala con separadores de miles.
+ggplot(salary, aes(x = Salary)) +
+  geom_histogram(fill = "steelblue", bins = 30, color = "white") +
+  scale_x_continuous(labels = comma) +
+  labs(
+    title = "Distribución de salarios",
+    x = "Salario (USD)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+```
+
+
+---
+
+## 4. Boxplot de salario 
+```{r boxplot Salarios, echo=FALSE}
+
+ggplot(salary, aes(x = "", y = Salary)) +
+  geom_boxplot(fill = "#4C72B0") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Distribución del salario",
+    x = "",
+    y = "Salario (USD)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank())
+``` 
+
+## 5. Salario y género
+
+```{r Salarios por género, echo=FALSE}
+# Boxplot de salarios por género
+ggplot(salary, aes(x = Gender, y = Salary, fill = Gender)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Salarios por género",
+    x = "Género",
+    y = "Salario (USD)"
+  ) +
+  theme_minimal()
+```
+
+## 6. Salario y Nivel Educativo 
+```{r Salarios por edu, echo=FALSE}
+
+ggplot(salary, aes(x = Education.Level, y = Salary, fill = Education.Level)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Salario por nivel educativo",
+    x = "Nivel educativo",
+    y = "Salario (USD)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "none")
+
+```
+
+
+## 7. Salario y Experiencia 
+```{r scaterplot Salarios, echo=FALSE}
+
+ggplot(salary, aes(x = Years.of.Experience, y = Salary)) +
+  geom_point(alpha = 0.4) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Salario vs Años de experiencia",
+    x = "Años de experiencia",
+    y = "Salario (USD)"
+  ) +
+  theme_minimal()
+
+```
+
+------------------------------------------------------------------------
+
+## 4. Diagnóstico del Modelo OLS
+
+```{r Modelo OLS 1, echo=FALSE}
+# Modelo OLS para comparar
+ols <- lm(Salary ~ Gender + Education.Level + Years.of.Experience, data = salary)
+summary(ols)
+```
+
+La información que brinda es que cada año de experiencia laboral aumenta en promedio 5973,80 USD (manteniendo constante la educación y el género). También se observa que el hombre gana 5392,40 USD al año más que la mujer. Ambos resultados son estadisticamente significativos (p-value muy pequeño). También se observa cuandos USD al año agrega cada uno de los niveles educativos, lo que permite intuir que estudiar más genera mayores ingresos.
+
+Si bien estos datos son estadisticamente significativos, al observar la información de "Residuals" observamos mucha dispersión, lo que motiva a recurrir a un análisis con técnicas más robustas.
+
+
+
+
+### 4.1. Análisis de Homocedasticidad
+
+El supuesto de homocedasticidad implica que la varianza del error es constante. Lo evaluamos gráficamente (Residuos vs. Ajustados) y con un test formal.
+
+```{r Gráfico Residuos vs. Ajustados, echo=FALSE}
+# Gráfico Residuos vs. Ajustados
+plot(ols, 1, main = "Gráfico 1: Residuos vs. Ajustados",
+     caption = "Test de Homocedasticidad")
+```
+
+El gráfico muestra que hay violación de los supuestos del modelo OLS. No se observa una dispersión aleatoria alrededor del cero, sino que se observa una asimetría. A su vez, se observa la tendencia (línea roja), y si bien se espera que sea plana y horizontal, esta linea cae, lo que significa que predice sueldos mucho más altos a partir de cierto nivel experiencia y nivel de educación.
+
+```{r Test de Breusch-Pagan, echo=FALSE}
+# Test formal de Breusch-Pagan
+bptest(ols)
+```
+
+Un p-valor muy pequeño (p \< 0.05) nos lleva a rechazar la hipótesis nula de homocedasticidad. Esto confirma que la varianza no es constante, violando un supuesto clave de OLS.
+
+### 4.2. Análisis de Normalidad de Residuos
+
+OLS asume que los residuos del modelo siguen una distribución normal.
+
+```{r Gráfico Q-Q de los residuos del modelo, echo=FALSE}
+# Gráfico Q-Q de los residuos del modelo
+plot(ols, 2, main = "Gráfico 2: Q-Q Plot de Residuos Estandarizados")
+
+# Test de Shapiro-Wilk sobre los residuos
+# (Tomamos una muestra de 5000 si hay más,
+# ya que shapiro.test tiene un límite)
+residuos <- residuals(ols)
+if (length(residuos) > 5000) {
+  shapiro_test <- shapiro.test(sample(residuos, 5000))
+} else {
+  shapiro_test <- shapiro.test(residuos)
+}
+print(shapiro_test)
+```
+
+El gráfico Q-Q de los residuos muestra una fuerte desviación de la línea de normalidad, tanto del lado izquierdo como del lado derecho. Si bien el centro de la distribución se ajusta razonablemente a la normalidad, se observan desviaciones significativas en ambas colas. El test de Shapiro-Wilk confirma (con un p-valor \< 0.05) que los residuos no se distribuyen normalmente.
+
+
+
+### 4.3. Análisis de Outliers y Puntos Influyentes
+
+La distancia de Cook nos permite identificar puntos influyentes, es decir puntos que son outliers (residuos altos) y tienen alta palanca (leverage, un valor atípico en las X).
+
+
+```{r Test de Cook, echo=FALSE}
+# Búsqueda de puntos influyentes con distancia de Cook
+
+# 1. Calcular distancia de Cook
+cooksd <- cooks.distance(ols)
+
+# 2. Graficar para ver los picos
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance")
+abline(h = 4*mean(cooksd, na.rm=T), col="red")  # Línea de corte (regla general)
+
+# 3. Ver los números de fila de los influyentes
+head(salary[cooksd > 4*mean(cooksd, na.rm=T), ])
+
+
+### 4.4. Conclusión del Diagnóstico OLS
+```
+
+El modelo OLS viola los supuestos de normalidad de residuos y homocedasticidad. Por lo tanto, las estimaciones de los coeficientes y sus errores estándar (y, por ende, sus p-valores) no son fiables. Esto justifica plenamente el uso de un método de regresión robusta.
+
+
+## 8. Modelos de regresión: OLS vs cuantiles
+
+###  Modelos de regresión por cuantiles
+
+```{r Modelos de regresión por cuantiles, echo=FALSE, warning=FALSE}
+# Modelos de regresión por cuantiles
+rq_25 <- rq(Salary ~ Gender + Education.Level + Years.of.Experience,
+            tau = 0.25, data = salary)
+rq_50 <- rq(Salary ~ Gender + Education.Level + Years.of.Experience,
+            tau = 0.5, data = salary)
+rq_75 <- rq(Salary ~ Gender + Education.Level + Years.of.Experience,
+            tau = 0.75, data = salary)
+
+# Resúmenes con errores estándar por bootstrap (más robustos)
+sum_rq25 <- summary(rq_25, se = "boot")
+sum_rq50 <- summary(rq_50, se = "boot")
+sum_rq75 <- summary(rq_75, se = "boot")
+
+sum_rq25
+sum_rq50
+sum_rq75
+```
+
+---
+
+## 9. Gráfico de coeficientes por cuantil
+
+```{r Gráfico de coeficientes por cuantil, echo=FALSE, warning=FALSE}
+# Cuantiles a estimar
+taus <- c(0.25, 0.5, 0.75)
+
+# Ajustar el modelo en todos los cuantiles
+fit_all <- rq(Salary ~ Gender + Education.Level + Years.of.Experience,
+              tau = taus, data = salary)
+
+# Resúmenes con errores bootstrap
+summary_fit <- summary(fit_all, se = "boot")
+
+# Pasar a formato "largo" para ggplot
+coef_df <- bind_rows(lapply(1:length(taus), function(i) {
+  data.frame(
+    tau = taus[i],
+    term = rownames(summary_fit[[i]]$coefficients),
+    estimate = summary_fit[[i]]$coefficients[, 1],
+    se = summary_fit[[i]]$coefficients[, 2]
+  )
+}))
+
+coef_df <- coef_df %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    lower = estimate - 1.96 * se,
+    upper = estimate + 1.96 * se
+  )
+
+ggplot(coef_df, aes(x = tau, y = estimate, color = term)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                width = 0.02, alpha = 0.5) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Coeficientes estimados por cuantil",
+    x = "Cuantil ( )",
+    y = "Efecto estimado sobre el salario (USD)",
+    color = "Variable"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+## 9. Regresion por cuantiles VS. OLS
+```{r Curvas cuantílicas vs OLS, echo=FALSE}
+# 1) Defino los cuantiles a estimar
+taus <- c(0.25, 0.5, 0.75)
+
+# 2) Ajusto un modelo rq separado para cada cuantil
+fit_q_list <- lapply(taus, function(tau) {
+  rq(Salary ~ Years.of.Experience, tau = tau, data = salary)
+})
+
+# 3) Ajusto el modelo OLS para comparar
+fit_ols <- lm(Salary ~ Years.of.Experience, data = salary)
+
+# 4) Grid de experiencia para predecir
+grid <- data.frame(
+  Years.of.Experience = seq(min(salary$Years.of.Experience),
+                            max(salary$Years.of.Experience),
+                            length.out = 100)
+)
+
+# 5) Predicciones para cada cuantil
+pred_df <- map_dfr(seq_along(taus), function(i) {
+  data.frame(
+    Years.of.Experience = grid$Years.of.Experience,
+    tau  = taus[i],
+    pred = predict(fit_q_list[[i]], newdata = grid)
+  )
+})
+
+# 6) Predicción OLS
+grid$ols <- predict(fit_ols, newdata = grid)
+
+# 7) Gráfico: puntos + rectas cuantílicas + recta OLS
+ggplot(salary, aes(x = Years.of.Experience, y = Salary)) +
+  geom_point(alpha = 0.2) +
+  geom_line(data = pred_df,
+            aes(y = pred, color = factor(tau)),
+            size = 1.1) +
+  geom_line(data = grid,
+            aes(y = ols),
+            linetype = "dashed", size = 1, color = "black") +
+  scale_y_continuous(labels = comma) +
+  scale_color_brewer(palette = "Set1",
+                     name = "Cuantil") +
+  labs(
+    title = "Regresiones por cuantiles vs OLS",
+    x = "Años de experiencia",
+    y = "Salario (USD)"
+  ) +
+  theme_minimal()
+
+```
+
+## 5. Modelos de regresión: OLS vs Robusta (M-estimación)
+
+Comparamos el modelo OLS (ya diagnosticado como problemático) con un modelo de Regresión Robusta (M-estimación).
+
+### 5.1. Teoría
+
+-   **Regresión OLS (Mínimos Cuadrados Ordinarios):** Estima el efecto promedio minimizando la suma de los errores al cuadrado\* Al elevar los residuos al cuadrado, este método penaliza desproporcionadamente los errores grandes. Por ello, es muy sensible a los outliers.
+
+-   **Regresión Robusta (M-estimación):** Busca estimar la tendencia estructural de los datos minimizando una función de pérdida que aumenta de forma menos agresiva que el cuadrado para los errores grandes. En este trabajo utilizaremos la estimación MM (Method of Moments), implementada en la función `rlm`. Este método es preferible porque combina una alta eficiencia estadística (como OLS bajo normalidad) con un alto punto de ruptura, lo que significa que puede resistir un porcentaje considerable de outliers y puntos de alta palanca sin que el modelo se rompa. Básicamente, el algoritmo asigna pesos (weights) decrecientes a las observaciones a medida que sus residuos se alejan de lo esperado, reduciendo su influencia en la estimación final.
+
+### 5.2. Estimación de modelos
+
+```{r Modelo OLS, echo=FALSE}
+# Modelo OLS (ya estimado)
+# ols <- lm(Salary ~ Gender + Education.Level + Years.of.Experience, data = salary)
+
+# Modelo de Regresión Robusta (M-estimación)
+# Usamos el método "MM", que es el estándar de alta robustez.
+rlm_model <- rlm(Salary ~ Gender + Education.Level + Years.of.Experience,
+                 data = salary,
+                 method = "MM")
+
+# Resumen OLS
+summary(ols)
+
+# Resumen del modelo robusto
+# Nota: rlm usa "t-values" en lugar de "t statistics"
+summary(rlm_model)
+
+# Para una mejor comparación de coeficientes (con p-valores robustos)
+# usamos la librería 'summary.lm'
+# summary(rlm_model) # (Formato estándar)
+# O usando coeftest del paquete lmtest para p-valores
+# coeftest(rlm_model)
+```
+
+## 6. Visualización de Resultados Robustos
+
+### 6.1 ¿A quién "penaliza" el modelo robusto?
+
+rlm funciona asignando "pesos" (weights) a cada observación. Un peso de 1 significa que la observación es "buena" y se usa normalmente. Un peso cercano a 0 significa que la observación es un outlier y su influencia en el modelo se reduce drásticamente.
+
+```{r Gráfico de pesos, echo=FALSE}
+# Extraer los pesos del modelo robusto
+pesos_df <- data.frame(
+  Fitted.Values = fitted(rlm_model),
+  Residuals = residuals(rlm_model),
+  Weights = rlm_model$w,
+  Salary = salary$Salary
+)
+
+# Graficar los pesos contra el salario real
+ggplot(pesos_df, aes(x = Salary, y = Weights)) +
+  geom_point(alpha = 0.5, color = "darkblue") +
+  scale_x_continuous(labels = comma) +
+  labs(
+    title = "Ponderaciones de la Regresión Robusta (rlm)",
+    x = "Salario (USD)",
+    y = "Peso asignado por rlm"
+  ) +
+  theme_minimal()
+```
+
+El gráfico muestra a qué datos les cree el modelo y a cuáles no tanto:
+
+Entre los 25.000 y 150.000 USD, confía en la mayoría de los datos, por eso los puntos se mantienen arriba. Son los datos que utiliza para marcar la tendencia.
+
+A partir de los 160.000 USD, los pesos asignados comienzan a tender a cero. El modelo detecta que estos salarios altos son atípicos y les quita influencia para que no distorsionen el resultado.
+
+Por último, los salarios cercanos a 0 son datos que el modelo ignora automáticamente sin necesidad de borrarlos manualmente.
+
+### 6.2 Comparación gráfica de coeficientes
+
+```{r Comparación gráfica, echo=FALSE}
+# Extraer coeficientes y errores estándar de ambos modelos
+ols_coef <- tidy(ols, conf.int = TRUE)
+rlm_coef <- tidy(rlm_model, conf.int = TRUE) # Broom funciona con rlm
+
+# Marcar el modelo y unir
+ols_coef$model <- "1. OLS (Clásico)"
+rlm_coef$model <- "2. RLM (Robusto)"
+
+# Rlm no provee CI por defecto en tidy, los calculamos
+# (Usando t-score de 1.96 por simplicidad)
+rlm_coef <- rlm_coef %>%
+  mutate(
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error
+  )
+
+# Unir y filtrar intercepto
+all_coef <- bind_rows(ols_coef, rlm_coef) %>%
+  filter(term != "(Intercept)")
+
+# Graficar
+ggplot(all_coef, aes(x = term, y = estimate, color = model)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.2,
+                position = position_dodge(width = 0.5)) +
+  scale_y_continuous(labels = comma) +
+  coord_flip() + # Girar ejes para leer variables
+  labs(
+    title = "Comparación de Coeficientes: OLS vs. RLM",
+    x = "Variable",
+    y = "Efecto estimado sobre el salario (USD)",
+    color = "Modelo"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+Este gráfico muestra la importancia que le dió cada modelo a cada variable. Por ejemplo el modelo robusto le dio mas importancia al género y a los años de experiencia, mientras que el OLS le dió más importancia a las variables educativas.
